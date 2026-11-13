@@ -551,6 +551,15 @@ export async function ensureAutoProbeJob(): Promise<string | null> {
     .limit(1);
   if (open && open.length) return null;
 
+  // Nothing new and unprobed → no job (avoids an empty job row every few minutes).
+  const { sql } = await import("@/integrations/d1/rpc.server");
+  const pending = await sql(
+    `SELECT 1 AS x FROM subdomains s WHERE s.first_seen_at >= ?
+       AND NOT EXISTS (SELECT 1 FROM probe_results pr WHERE pr.host = s.host) LIMIT 1`,
+    new Date(Date.now() - 24 * 3600_000).toISOString(),
+  );
+  if (!pending.length) return null;
+
   const { data: recent } = await supabaseAdmin
     .from("probe_jobs")
     .select("id")

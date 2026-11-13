@@ -600,11 +600,14 @@ async function statsRoute(ctx: Ctx): Promise<Response> {
 async function exportRoute(ctx: Ctx): Promise<Response> {
   if (ctx.method !== "GET") return apiError(405, "method_not_allowed", "Use GET.", ctx.meta);
   const forward = new URL(`${ctx.url.origin}/api/public/export`);
-  for (const key of ["platform", "domain", "scope", "hours", "search", "format"]) {
+  for (const key of ["platform", "domain", "scope", "hours", "search", "format", "cursor"]) {
     const value = ctx.url.searchParams.get(key);
     if (value) forward.searchParams.set(key, value);
   }
-  const upstream = await fetch(forward.toString());
+  // A Worker can't fetch its own workers.dev hostname (Cloudflare error 1042): go through the SELF binding.
+  const { cfEnv } = await import("@/integrations/d1/env.server");
+  const self = cfEnv().SELF;
+  const upstream = (self ? await self.fetch(forward.toString() as never) : await fetch(forward.toString())) as unknown as Response;
   const headers = new Headers(upstream.headers);
   for (const [k, v] of Object.entries(corsHeaders())) headers.set(k, v);
   headers.set("X-Request-Id", ctx.meta.requestId);

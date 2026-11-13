@@ -31,7 +31,7 @@ export async function fetchChaosHosts(domain: string, timeoutMs = 20_000): Promi
 const memo = new Map<string, { at: number; hosts: string[] }>();
 
 /** Live host list for one root domain (edge-cached for an hour). */
-export async function liveHosts(domain: string): Promise<string[]> {
+export async function liveHosts(domain: string, timeoutMs = 20_000): Promise<string[]> {
   const d = domain.toLowerCase();
   const m = memo.get(d);
   if (m && Date.now() - m.at < 60_000) return m.hosts;
@@ -47,7 +47,7 @@ export async function liveHosts(domain: string): Promise<string[]> {
       return hosts;
     }
   }
-  const { hosts } = await fetchChaosHosts(d);
+  const { hosts } = await fetchChaosHosts(d, timeoutMs);
   if (cache) {
     await cache.put(
       key,

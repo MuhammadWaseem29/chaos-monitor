@@ -66,7 +66,7 @@ export async function dispatch() {
   const budget = num(secret("WRITE_BUDGET"), 80_000);
   const day = await sql1<{ rows_written: number }>("SELECT rows_written FROM daily_stats WHERE day = date('now')");
   const writesToday = Number(day?.rows_written ?? 0);
-  const m = await meta(["scan_cursor", "agg_at", "cleanup_day", "cycle_started_at"]);
+  const m = await meta(["scan_cursor", "agg_at", "cleanup_day", "cycle_started_at", "scan_leftover"]);
   const jobs: Promise<unknown>[] = [];
 
   // Domain-wide aggregates (counts over ~22k rows) every 30 minutes.
@@ -100,6 +100,14 @@ export async function dispatch() {
     if (doms.length) {
       type Ref = { id: string; domain: string; total: number; baselined: boolean };
       const groups: Ref[][] = [];
+      // Domains a previous run had to stop before (data budget) are scanned first, alone.
+      let leftover: Ref[] = [];
+      try {
+        leftover = m.scan_leftover ? (JSON.parse(m.scan_leftover) as Ref[]) : [];
+      } catch {
+        leftover = [];
+      }
+      for (const l of leftover.slice(0, 40)) groups.push([l]);
       let cur: Ref[] = [];
       for (const d of doms) {
         const big = d.total_subdomains > BIG_ROOT || d.last_scan_status === "too_large";
@@ -124,6 +132,12 @@ export async function dispatch() {
       await setMeta("engine_tick", JSON.stringify(tick));
 
       const results = await Promise.all(groups.map((g) => callInternal("scan", { domains: g })));
+      const nextLeftover: Ref[] = leftover.slice(40);
+      results.forEach((r, i) => {
+        const done = r.ok ? Number(r.result?.processed ?? 0) : 0;
+        if (r.ok && done < groups[i]!.length) nextLeftover.push(...groups[i]!.slice(done));
+      });
+      if (nextLeftover.length || leftover.length) await setMeta("scan_leftover", JSON.stringify(nextLeftover.slice(0, 400)));
       let processed = 0;
       let fresh = 0;
       let errors = 0;

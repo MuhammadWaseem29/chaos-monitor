@@ -95,6 +95,8 @@ export const addDomains = createServerFn({ method: "POST" })
       if (error) throw new Error(error.message);
     }
 
+    await (await import("@/integrations/d1/rpc.server")).rebuildAgg();
+
     return { added: list.length };
   });
 
@@ -128,6 +130,7 @@ export const savePlatform = createServerFn({ method: "POST" })
     if (data.id) {
       const { error } = await supabaseAdmin.from("platforms").update(row).eq("id", data.id);
       if (error) throw new Error(error.message);
+      await (await import("@/integrations/d1/rpc.server")).rebuildAgg();
       return { id: data.id, updated: true };
     }
 
@@ -137,6 +140,7 @@ export const savePlatform = createServerFn({ method: "POST" })
       .select("id")
       .single();
     if (error) throw new Error(error.message);
+    await (await import("@/integrations/d1/rpc.server")).rebuildAgg();
     return { id: inserted.id, updated: false };
   });
 
@@ -178,6 +182,7 @@ export const deletePlatform = createServerFn({ method: "POST" })
 
     const { error } = await supabaseAdmin.from("platforms").delete().eq("id", data.id);
     if (error) throw new Error(error.message);
+    await (await import("@/integrations/d1/rpc.server")).rebuildAgg();
     return { ok: true };
   });
 
@@ -213,6 +218,7 @@ export const updateDomain = createServerFn({ method: "POST" })
 
     const { error } = await supabaseAdmin.from("domains").update(patch).eq("id", data.id);
     if (error) throw new Error(error.message);
+    await (await import("@/integrations/d1/rpc.server")).rebuildAgg();
     return { ok: true };
   });
 
@@ -226,6 +232,7 @@ export const deleteDomain = createServerFn({ method: "POST" })
     await supabaseAdmin.from("scans").delete().eq("domain_id", data.id);
     const { error } = await supabaseAdmin.from("domains").delete().eq("id", data.id);
     if (error) throw new Error(error.message);
+    await (await import("@/integrations/d1/rpc.server")).rebuildAgg();
     return { ok: true };
   });
 

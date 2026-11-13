@@ -59,10 +59,15 @@ export const Route = createFileRoute("/api/db")({
       POST: async ({ request }) => {
         const query = await request.json().catch(() => null);
         if (!query) return Response.json({ data: null, error: { message: "bad query" }, count: null }, { status: 400 });
-        const { result, user } = await run(request, query);
-        if (!user && (query as { kind?: string }).kind !== "select" && (query as { kind?: string }).kind !== "rpc") {
-          return Response.json({ data: null, error: { message: "Unauthorized" }, count: null }, { status: 401 });
+        // Writes need a signed-in user; refuse before touching the database.
+        const kind = (query as { kind?: string }).kind;
+        if (kind !== "select" && kind !== "rpc") {
+          const { bearer, userFromToken } = await import("@/integrations/d1/auth.server");
+          if (!(await userFromToken(bearer(request)))) {
+            return Response.json({ data: null, error: { message: "Unauthorized" }, count: null }, { status: 401 });
+          }
         }
+        const { result } = await run(request, query);
         return Response.json(result, { status: result.error ? 400 : 200, headers: { "cache-control": "no-store" } });
       },
     },

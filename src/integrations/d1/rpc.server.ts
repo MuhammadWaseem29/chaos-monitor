@@ -285,11 +285,23 @@ async function lastScanned(domain: string, fallback: string | null) {
 type LiveSub = { id: string; host: string; label: string; first_seen_at: string | null; last_seen_at: string | null; is_active: boolean };
 
 /** Full list for one domain: discovered rows (with real first_seen) + the rest of the live Chaos list. */
+/** Domains whose live list could not be fetched this request (too large for the free plan). */
+export const liveUnavailable = new Set<string>();
+
 async function domainSubs(domainId: string): Promise<LiveSub[]> {
   const d = await domainRow(domainId);
   if (!d) return [];
   const [hosts, known, seen] = await Promise.all([
-    liveHosts(d.domain).catch(() => [] as string[]),
+    liveHosts(d.domain).then(
+      (h) => {
+        liveUnavailable.delete(domainId);
+        return h;
+      },
+      () => {
+        liveUnavailable.add(domainId);
+        return [] as string[];
+      },
+    ),
     sql<{ id: string; host: string; label: string; first_seen_at: string; last_seen_at: string }>(
       "SELECT id, host, label, first_seen_at, last_seen_at FROM subdomains WHERE domain_id = ?",
       domainId,
@@ -314,7 +326,11 @@ function filterSubs(rows: LiveSub[], search?: string, filter?: string) {
   return rows.filter(
     (r) =>
       (!s || r.host.includes(s)) &&
-      (!filter || filter === "all" || (filter === "new" && (r.first_seen_at ?? "") > cutoff) || (filter === "inactive" && !r.is_active)),
+      (!filter ||
+        filter === "all" ||
+        // "new" = actually discovered after the baseline (rows from the subdomains table), not baseline hosts.
+        (filter === "new" && r.id !== r.host && (r.first_seen_at ?? "") > cutoff) ||
+        (filter === "inactive" && !r.is_active)),
   );
 }
 
@@ -329,6 +345,7 @@ const domain_subdomains_count: RpcImpl = async ({ _domain_id, _search, _filter }
 
 const domain_subdomain_stats: RpcImpl = async ({ _domain_id }) => {
   const rows = await domainSubs(_domain_id);
+  const stored = liveUnavailable.has(_domain_id) ? Number((await domainRow(_domain_id))?.total_subdomains ?? 0) : null;
   const d24 = ago(24 * H);
   const d7 = ago(7 * 24 * H);
   const fresh = await sql1<{ a: number; b: number }>(
@@ -339,10 +356,10 @@ const domain_subdomain_stats: RpcImpl = async ({ _domain_id }) => {
   );
   return [
     {
-      total: rows.length,
+      total: stored ?? rows.length,
       new_24h: Number(fresh?.a ?? 0),
       new_7d: Number(fresh?.b ?? 0),
-      active: rows.length,
+      active: stored ?? rows.length,
       inactive: 0,
       latest_seen: rows.reduce<string | null>((m, r) => (r.last_seen_at && (!m || r.last_seen_at > m) ? r.last_seen_at : m), null),
     },
@@ -358,7 +375,8 @@ const domain_new_subs: RpcImpl = async ({ _domain_id, since, lim }) =>
   );
 
 /** Live full lists for every domain of a platform, keyset-paged by (domain_id, host). */
-export const PLATFORM_PAGE_FETCH_BUDGET = 30;
+// ~3 subrequests per uncached root (cache match, Chaos fetch, cache put); the free plan allows 50.
+export const PLATFORM_PAGE_FETCH_BUDGET = 12;
 const platform_subdomains_page: RpcImpl = async ({ _platform_id, _after_domain, _after_host, _lim, _domain_filter }) => {
   const lim = clamp(_lim, 1000, 1, 10000);
   const doms = await sql<{ id: string; domain: string; claimed_at: string | null; created_at: string }>(

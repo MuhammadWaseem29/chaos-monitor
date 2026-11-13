@@ -32,7 +32,7 @@ async function fetchAllPages(origFetch: typeof fetch, url: string, init?: Reques
         /* ignore malformed page */
       }
     } else {
-      let text = body.replace(/^# next: .*$\n?/m, "");
+      let text = body.replace(/^# next: .*$\n?/gm, "");
       if (format === "csv" && page > 0) text = text.replace(/^host,first_seen_at,last_seen_at,is_active\n/, "");
       parts.push(text);
     }
@@ -40,6 +40,7 @@ async function fetchAllPages(origFetch: typeof fetch, url: string, init?: Reques
     if (!cursor) break;
     target.searchParams.set("cursor", cursor);
     res = await origFetch(target.toString(), init);
+    if (!res.ok) res = await origFetch(target.toString(), init); // one retry
     if (!res.ok) break;
   }
   const merged = format === "json" ? JSON.stringify(jsonRows, null, 0) : parts.join("");

@@ -255,6 +255,10 @@ export async function handleRawExport(request: Request, splat: string): Promise<
               w.write([...rows].sort((a, b) => a.host.localeCompare(b.host)));
               if (rows.length < 1000) break;
             }
+            const { liveUnavailable } = await import("@/integrations/d1/rpc.server");
+            if (liveUnavailable.has(domainRow.id) && format === "txt") {
+              controller.enqueue(encoder.encode(`# ${domainRow.domain}: list too large for the free plan (download it from chaos.projectdiscovery.io)\n`));
+            }
           } else {
           let from = 0;
           for (let page = 0; page < 5000; page++) {

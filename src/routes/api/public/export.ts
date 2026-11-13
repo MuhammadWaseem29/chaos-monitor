@@ -83,7 +83,8 @@ export const Route = createFileRoute("/api/public/export")({
         // Full lists are not stored in D1: "all" exports read each root domain's
         // live Chaos list (edge-cached). One request handles up to LIVE_BUDGET roots
         // and hands back a cursor for the rest. "new" exports read D1 directly.
-        const LIVE_BUDGET = 30;
+        // Each uncached root costs ~3 subrequests (cache match, Chaos fetch, cache put); free plan allows 50.
+        const LIVE_BUDGET = 12;
         type Row = { host: string; first_seen_at: string | null; last_seen_at: string | null; is_active: boolean };
 
         async function* rows(): AsyncGenerator<Row[]> {
@@ -117,23 +118,53 @@ export const Route = createFileRoute("/api/public/export")({
             return;
           }
           const { liveHosts } = await import("@/integrations/d1/chaos-live.server");
-          let q = supabaseAdmin.from("domains").select("id, domain, claimed_at, created_at").order("domain", { ascending: true }).limit(LIVE_BUDGET + 1);
+          let q = supabaseAdmin.from("domains").select("id, domain, claimed_at, created_at, last_scan_status").order("domain", { ascending: true }).limit(LIVE_BUDGET + 1);
           if (domainIds) q = q.in("id", domainIds);
           if (cursorParam) q = q.gt("domain", cursorParam);
           const { data: doms, error } = await q;
           if (error) throw new Error(error.message);
-          const list = (doms ?? []) as Array<{ id: string; domain: string; claimed_at: string | null; created_at: string }>;
+          const list = (doms ?? []) as Array<{ id: string; domain: string; claimed_at: string | null; created_at: string; last_scan_status: string | null }>;
           if (list.length > LIVE_BUDGET) nextCursor = list[LIVE_BUDGET - 1]!.domain;
           const s1 = search.toLowerCase();
           const k1 = keyword.toLowerCase();
-          for (const d of list.slice(0, LIVE_BUDGET)) {
-            const hosts = await liveHosts(d.domain).catch(() => [] as string[]);
+          // The whole page is collected before the response starts (the cursor header must be final),
+          // within a time budget so one slow or giant root can't stall the download.
+          const deadline = Date.now() + 20_000;
+          const page: Row[][] = [];
+          const note = (domain: string, why: string): Row[] =>
+            format === "txt" ? [{ host: `# ${domain}: ${why} (full list: chaos.projectdiscovery.io)`, first_seen_at: null, last_seen_at: null, is_active: false }] : [];
+          const slice = list.slice(0, LIVE_BUDGET);
+          for (let i = 0; i < slice.length; i++) {
+            const d = slice[i]!;
+            // Not enough time left for a fair fetch: hand this root and the rest to the next page.
+            if (i > 0 && Date.now() > deadline - 4_000) {
+              nextCursor = slice[i - 1]!.domain;
+              break;
+            }
+            if (d.last_scan_status === "too_large") {
+              page.push(note(d.domain, "list too large for the free plan"));
+              continue;
+            }
+            let hosts: string[];
+            try {
+              hosts = await liveHosts(d.domain, Math.min(12_000, deadline - Date.now()));
+            } catch {
+              // Ran out of time on this root: retry it on the next page instead of reporting a failure.
+              if (i > 0 && Date.now() > deadline - 4_000) {
+                nextCursor = slice[i - 1]!.domain;
+                break;
+              }
+              page.push(note(d.domain, "list could not be fetched right now (too large or Chaos busy) — try again"));
+              continue;
+            }
             const seen = d.claimed_at ?? d.created_at;
-            const out = hosts
-              .filter((h) => (!s1 || h.includes(s1)) && (!k1 || h.includes(k1)))
-              .map((h) => ({ host: h, first_seen_at: seen, last_seen_at: d.claimed_at, is_active: true }));
-            if (out.length) yield out;
+            page.push(
+              hosts
+                .filter((h) => (!s1 || h.includes(s1)) && (!k1 || h.includes(k1)))
+                .map((h) => ({ host: h, first_seen_at: seen, last_seen_at: d.claimed_at, is_active: true })),
+            );
           }
+          for (const chunk of page) if (chunk.length) yield chunk;
         }
 
         // Cursor must be known before headers go out, so resolve the domain page first.
