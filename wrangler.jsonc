@@ -1,20 +1,18 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "chaos-monitor",
-  "main": "worker/index.ts",
+  // nitro builds the TanStack Start app to .output/server; worker.mjs adds the cron.
+  "main": ".output/server/worker.mjs",
+  "no_bundle": true,
+  "rules": [{ "type": "ESModule", "globs": ["**/*.mjs", "**/*.js"] }],
   "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "observability": { "enabled": true },
 
-  // React app (static assets are free + unlimited on Workers).
-  "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/raw/*", "/_internal/*"]
-  },
+  "assets": { "directory": ".output/public", "binding": "ASSETS" },
 
-  // Runs the dispatcher once a minute.
+  // One engine tick per minute (replaces Lovable's pg_cron "chaos-rolling-scan").
   "triggers": { "crons": ["* * * * *"] },
 
   "d1_databases": [
@@ -26,15 +24,10 @@
     }
   ],
 
-  // Self binding: each unit of work runs in its own invocation with a fresh free-plan budget.
+  // Fan-out: each unit of work runs in its own invocation with a fresh free-plan budget.
   "services": [{ "binding": "SELF", "service": "chaos-monitor" }],
 
   "vars": {
-    "MAX_RAW_BYTES": "393216",
-    "TASK_FANOUT": "20",
-    "PROBE_FANOUT": "6",
-    "WRITE_BUDGET": "80000",
-    "RETENTION_DAYS": "60",
-    "ALERT_PROGRAMS": ""
+    "WRITE_BUDGET": "90000"
   }
 }

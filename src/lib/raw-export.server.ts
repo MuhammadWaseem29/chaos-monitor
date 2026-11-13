@@ -1,0 +1,359 @@
+/**
+ * Public, unauthenticated raw host lists.
+ *
+ *   /raw/tesla.com              every host for one root domain
+ *   /raw/tesla.com/new          hosts first seen in the last N hours (default 24)
+ *   /raw/hackerone              every host across a platform
+ *   /raw/hackerone/tesla        every host for one program on that platform
+ *
+ * Optional query params: format=txt|csv|json, hours=<n>, scope=all|new|inactive,
+ * active=false to include retired hosts in platform dumps.
+ */
+
+const PAGE = 1000;
+const PLATFORM_PAGE = 10000;
+
+type Row = {
+  host: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  is_active: boolean;
+};
+
+type Format = "txt" | "csv" | "json";
+
+function textResponse(body: string, status: number) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=60",
+    },
+  });
+}
+
+function contentType(format: Format) {
+  return format === "json"
+    ? "application/json; charset=utf-8"
+    : format === "csv"
+      ? "text/csv; charset=utf-8"
+      : "text/plain; charset=utf-8";
+}
+
+function makeWriter(format: Format, controller: ReadableStreamDefaultController, enc: TextEncoder) {
+  let emitted = 0;
+  return {
+    write(rows: Row[]) {
+      if (!rows.length) return;
+      if (format === "csv") {
+        if (emitted === 0) enc && controller.enqueue(enc.encode("host,first_seen_at,last_seen_at,is_active\n"));
+        controller.enqueue(
+          enc.encode(
+            rows.map((r) => `${r.host},${r.first_seen_at},${r.last_seen_at},${r.is_active}`).join("\n") + "\n",
+          ),
+        );
+      } else if (format === "json") {
+        const body = rows.map((r) => JSON.stringify(r)).join(",\n");
+        controller.enqueue(enc.encode((emitted === 0 ? "[\n" : ",\n") + body));
+      } else {
+        controller.enqueue(enc.encode(rows.map((r) => r.host).join("\n") + "\n"));
+      }
+      emitted += rows.length;
+    },
+    finish() {
+      if (format === "json") controller.enqueue(enc.encode(emitted === 0 ? "[]\n" : "\n]\n"));
+    },
+    get count() {
+      return emitted;
+    },
+  };
+}
+
+type LiveRow = {
+  host: string;
+  url: string;
+  status_code: number | null;
+  title: string | null;
+  probed_at: string;
+};
+
+async function streamLiveHosts(
+  supabaseAdmin: Awaited<ReturnType<typeof getAdmin>>,
+  domainIds: string[] | null,
+  format: Format,
+  source: string,
+  sinceIso?: string,
+): Promise<Response> {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = encoder;
+      let emitted = 0;
+      const writeRows = (rows: LiveRow[]) => {
+        if (!rows.length) return;
+        if (format === "csv") {
+          if (emitted === 0) controller.enqueue(enc.encode("host,url,status_code,title,probed_at\n"));
+          controller.enqueue(
+            enc.encode(
+              rows
+                .map(
+                  (r) =>
+                    `${r.host},${r.url},${r.status_code ?? ""},"${(r.title ?? "").replace(/"/g, '""')}",${r.probed_at}`,
+                )
+                .join("\n") + "\n",
+            ),
+          );
+        } else if (format === "json") {
+          const body = rows.map((r) => JSON.stringify(r)).join(",\n");
+          controller.enqueue(enc.encode((emitted === 0 ? "[\n" : ",\n") + body));
+        } else {
+          controller.enqueue(enc.encode(rows.map((r) => r.host).join("\n") + "\n"));
+        }
+        emitted += rows.length;
+      };
+      const groups: Array<string[] | null> = domainIds
+        ? Array.from({ length: Math.ceil(domainIds.length / 20) }, (_, i) =>
+            domainIds.slice(i * 20, i * 20 + 20),
+          )
+        : [null];
+      try {
+        for (const ids of groups) {
+          let from = 0;
+          for (let page = 0; page < 20000; page++) {
+            let q = supabaseAdmin
+              .from("probe_results")
+              .select("host, url, status_code, title, probed_at")
+              .eq("failed", false);
+            if (ids) q = q.in("domain_id", ids);
+            if (sinceIso) q = q.gte("probed_at", sinceIso);
+            const { data, error } = await q
+              .order("host", { ascending: true })
+              .range(from, from + PAGE - 1);
+            if (error) throw new Error(error.message || "database error");
+            if (!data || data.length === 0) break;
+            writeRows(data as LiveRow[]);
+            if (data.length < PAGE) break;
+            from += PAGE;
+          }
+        }
+      } catch (e) {
+        controller.enqueue(
+          enc.encode(`\n# error: ${e instanceof Error ? e.message : String(e)}\n`),
+        );
+      }
+      if (format === "json" && emitted === 0) controller.enqueue(enc.encode("[]\n"));
+      else if (format === "json") controller.enqueue(enc.encode("\n]\n"));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": contentType(format),
+      "Access-Control-Allow-Origin": "*",
+      "X-Chaos-Source": source,
+    },
+  });
+}
+
+async function getAdmin() {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  return supabaseAdmin;
+}
+
+export async function handleRawExport(request: Request, splat: string): Promise<Response> {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+      },
+    });
+  }
+
+  const url = new URL(request.url);
+  const segments = splat
+    .split("/")
+    .map((s) => decodeURIComponent(s).trim().toLowerCase())
+    .filter(Boolean);
+
+  if (segments.length === 0) {
+    return textResponse(
+      [
+        "# Chaos raw lists — plain text, no authentication",
+        "",
+        "/raw/{domain}                 all hosts for one root domain",
+        "/raw/{domain}/new             hosts first seen in the last 24h (?hours=N)",
+        "/raw/{domain}/live            hosts that answered a live probe",
+        "/raw/mainlive.txt             every live host we have ever seen (grows over time)",
+        "/raw/mainlive.txt/new         live hosts probed in the last 24h (?hours=N)",
+        "/raw/{platform}               all hosts across a platform",
+        "/raw/{platform}/{program}     all hosts for one program on that platform",
+        "",
+        "Optional: ?format=txt|csv|json  ?hours=N  ?scope=all|new|inactive  ?active=false",
+        "",
+      ].join("\n"),
+      200,
+    );
+  }
+
+  const rawFormat = (url.searchParams.get("format") ?? "").toLowerCase();
+  const format: Format = rawFormat === "csv" || rawFormat === "json" ? rawFormat : "txt";
+  const hours = Number(url.searchParams.get("hours") ?? 24);
+  const sinceIso = new Date(
+    Date.now() - (Number.isFinite(hours) && hours > 0 ? hours : 24) * 3600_000,
+  ).toISOString();
+
+  const first = segments[0] ?? "";
+  const second = segments[1];
+
+  // ---- global live list (mainlive.txt) ------------------------------------
+  if (first === "mainlive" || first === "mainlive.txt" || first === "live") {
+    const { supabaseAdmin: adminAll } = await import("@/integrations/supabase/client.server");
+    const onlyNew = (second ?? url.searchParams.get("scope") ?? "").toLowerCase() === "new";
+    return streamLiveHosts(
+      adminAll,
+      null,
+      format,
+      onlyNew ? "live:all/new" : "live:all",
+      onlyNew ? sinceIso : undefined,
+    );
+  }
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const encoder = new TextEncoder();
+
+  // ---- domain list -------------------------------------------------------
+  const looksLikeDomain = first.includes(".");
+  if (looksLikeDomain) {
+    const { data: domainRow } = await supabaseAdmin
+      .from("domains")
+      .select("id, domain")
+      .eq("domain", first)
+      .maybeSingle();
+    if (!domainRow) return textResponse("", 404);
+
+    const rawScope = (second ?? url.searchParams.get("scope") ?? "all").toLowerCase();
+    if (rawScope === "live") {
+      return streamLiveHosts(supabaseAdmin, [domainRow.id], format, `live:${domainRow.domain}`);
+    }
+    const scope = rawScope === "new" || rawScope === "inactive" ? rawScope : "all";
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const w = makeWriter(format, controller, encoder);
+        try {
+          if (scope === "all") {
+            // Full list comes live from Chaos (not stored in D1).
+            const { rpc } = { rpc: supabaseAdmin.rpc.bind(supabaseAdmin) };
+            for (let off = 0; off < 2_000_000; off += 1000) {
+              const { data, error } = await rpc("domain_subdomains_page", { _domain_id: domainRow.id, _filter: "all", _limit: 1000, _offset: off });
+              if (error) throw new Error(error.message || "database error");
+              const rows = (data ?? []) as Row[];
+              if (!rows.length) break;
+              w.write([...rows].sort((a, b) => a.host.localeCompare(b.host)));
+              if (rows.length < 1000) break;
+            }
+          } else {
+          let from = 0;
+          for (let page = 0; page < 5000; page++) {
+            let q = supabaseAdmin
+              .from("subdomains")
+              .select("host, first_seen_at, last_seen_at, is_active")
+              .eq("domain_id", domainRow.id)
+              .order("host", { ascending: true })
+              .range(from, from + PAGE - 1);
+            if (scope === "inactive") q = q.eq("is_active", false);
+            if (scope === "new") q = q.gte("first_seen_at", sinceIso);
+            const { data, error } = await q;
+            if (error) throw new Error(error.message || "database error");
+            if (!data || data.length === 0) break;
+            w.write(data as Row[]);
+            if (data.length < PAGE) break;
+            from += PAGE;
+          }
+          }
+        } catch (e) {
+          controller.enqueue(
+            encoder.encode(`\n# error: ${e instanceof Error ? e.message : String(e)}\n`),
+          );
+        }
+        w.finish();
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": contentType(format),
+        "Access-Control-Allow-Origin": "*",
+        "X-Chaos-Source": `domain:${domainRow.domain}`,
+      },
+    });
+  }
+
+  // ---- platform (optionally one program) ---------------------------------
+  const { data: platform } = await supabaseAdmin
+    .from("platforms")
+    .select("id, slug")
+    .eq("slug", first)
+    .maybeSingle();
+  if (!platform) return textResponse("", 404);
+
+  const program = second ?? url.searchParams.get("program")?.trim().toLowerCase() ?? null;
+  const activeOnly = url.searchParams.get("active") !== "false";
+
+  const wantsLive = url.searchParams.get("scope") === "live";
+  if (wantsLive) {
+    let dq = supabaseAdmin.from("domains").select("id").eq("platform_id", platform.id);
+    if (program) dq = dq.ilike("domain", `%${program}%`);
+    const ids: string[] = [];
+    for (let page = 0; page < 200; page++) {
+      const { data } = await dq.range(page * PAGE, page * PAGE + PAGE - 1);
+      ids.push(...(data ?? []).map((d) => d.id));
+      if (!data || data.length < PAGE) break;
+    }
+    return streamLiveHosts(supabaseAdmin, ids, format, program ? `live:${platform.slug}/${program}` : `live:${platform.slug}`);
+  }
+
+  // Platform lists are built from live Chaos lists, one page (up to ~30 root
+  // domains) per request on the free plan. Follow X-Next-Cursor / "# next:" for more.
+  const cursorRaw = url.searchParams.get("cursor") ?? "";
+  const [afterDomain, afterHost = ""] = cursorRaw ? cursorRaw.split("|") : [null, ""];
+  const { data: pageData, error: pageError } = await supabaseAdmin.rpc("platform_subdomains_page", {
+    _platform_id: platform.id,
+    _lim: PLATFORM_PAGE,
+    _active_only: activeOnly,
+    ...(program ? { _domain_filter: program } : {}),
+    ...(afterDomain ? { _after_domain: afterDomain, _after_host: afterHost } : {}),
+  });
+  const pageRows = (pageData ?? []) as Array<Row & { domain_id: string; domain: string; __more?: boolean }>;
+  const lastRow = pageRows[pageRows.length - 1];
+  const nextCursor = lastRow && (pageRows.length >= PLATFORM_PAGE || lastRow.__more) ? `${lastRow.domain_id}|${lastRow.host}` : null;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const w = makeWriter(format, controller, encoder);
+      if (pageError) controller.enqueue(encoder.encode(`\n# error: ${pageError.message}\n`));
+      w.write(pageRows.map((r) => ({ host: r.host, first_seen_at: r.first_seen_at, last_seen_at: r.last_seen_at, is_active: r.is_active })));
+      w.finish();
+      if (nextCursor && format !== "json") {
+        const next = new URL(url.toString());
+        next.searchParams.set("cursor", nextCursor);
+        controller.enqueue(encoder.encode(`# next: ${next.pathname}${next.search}\n`));
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": contentType(format),
+      "Access-Control-Allow-Origin": "*",
+      "X-Chaos-Source": program ? `program:${platform.slug}/${program}` : `platform:${platform.slug}`,
+      "Access-Control-Expose-Headers": "X-Next-Cursor",
+      ...(nextCursor ? { "X-Next-Cursor": nextCursor } : {}),
+    },
+  });
+}

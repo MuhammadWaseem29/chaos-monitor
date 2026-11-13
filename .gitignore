@@ -1,7 +1,13 @@
 node_modules
 dist
+.output
 .wrangler
+.nitro
+.tanstack
+.env
+.env.*
 .dev.vars
+.admin-token
+.test-account
 *.log
 .DS_Store
-.admin-token
