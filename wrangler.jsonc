@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chaos-monitor",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // React app (static assets are free + unlimited on Workers).
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/raw/*", "/_internal/*"]
+  },
+
+  // Runs the dispatcher once a minute.
+  "triggers": { "crons": ["* * * * *"] },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chaos-monitor",
+      "database_id": "5c8a45aa-a621-4345-8abb-f1a3ef75d6e4",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Self binding: each unit of work runs in its own invocation with a fresh free-plan budget.
+  "services": [{ "binding": "SELF", "service": "chaos-monitor" }],
+
+  "vars": {
+    "MAX_RAW_BYTES": "393216",
+    "TASK_FANOUT": "20",
+    "PROBE_FANOUT": "6",
+    "WRITE_BUDGET": "80000",
+    "RETENTION_DAYS": "60",
+    "ALERT_PROGRAMS": ""
+  }
+}

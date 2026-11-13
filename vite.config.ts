@@ -1,0 +1,15 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import { fileURLToPath } from "node:url";
+
+export default defineConfig({
+  root: "web",
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { "@": fileURLToPath(new URL("./web/src", import.meta.url)) } },
+  build: { outDir: "../dist", emptyOutDir: true },
+  server: {
+    // Point the dev UI at the deployed Worker's API.
+    proxy: { "/api": process.env.API_ORIGIN ?? "http://localhost:8787", "/raw": process.env.API_ORIGIN ?? "http://localhost:8787" },
+  },
+});
