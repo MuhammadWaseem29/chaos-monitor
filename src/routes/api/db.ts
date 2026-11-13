@@ -38,11 +38,22 @@ export const Route = createFileRoute("/api/db")({
         const authed = Boolean(request.headers.get("authorization"));
         const cache = (caches as unknown as { default: Cache }).default;
         const key = new Request(url.toString());
+        // Long-lived copy of the last good answer, served if D1 refuses queries (free-plan daily limit).
+        const staleKey = new Request(`${url.origin}/__stale${url.pathname}${url.search}`);
         if (!authed) {
           const hit = await cache.match(key);
           if (hit) return hit;
         }
         const { result, user } = await run(request, query);
+        if (result.error && /D1_ERROR|daily row|exceeded/i.test(result.error.message)) {
+          const stale = await cache.match(staleKey);
+          if (stale) {
+            const body = await stale.text();
+            return new Response(body, {
+              headers: { "content-type": "application/json", "cache-control": "public, max-age=60", "x-chaos-stale": "1" },
+            });
+          }
+        }
         const ttl = query.kind === "rpc" && FAST_RPCS.has(query.fn ?? "") ? 5 : 15;
         const res = Response.json(result, {
           status: result.error ? 400 : 200,
@@ -50,7 +61,11 @@ export const Route = createFileRoute("/api/db")({
         });
         if (!user && !result.error) {
           const ctx = (globalThis as { __ctx__?: { waitUntil(p: Promise<unknown>): void } }).__ctx__;
-          const p = cache.put(key, res.clone());
+          const body = await res.clone().text();
+          const p = Promise.all([
+            cache.put(key, res.clone()),
+            cache.put(staleKey, new Response(body, { headers: { "content-type": "application/json", "cache-control": "public, max-age=172800" } })),
+          ]);
           if (ctx) ctx.waitUntil(p);
           else await p;
         }

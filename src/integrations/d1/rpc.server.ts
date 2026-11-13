@@ -70,14 +70,15 @@ export async function getAgg(): Promise<Agg> {
 }
 
 export async function rebuildAgg(): Promise<Agg> {
-  const [tot, plats] = await Promise.all([
-    sql1<{ n: number; e: number; b: number; s: number }>(
-      `SELECT COUNT(*) AS n, SUM(enabled) AS e, SUM(claimed_at IS NOT NULL) AS b, COALESCE(SUM(total_subdomains), 0) AS s FROM domains`,
-    ),
-    sql<{ platform_id: string | null; n: number; s: number }>(
-      `SELECT platform_id, COUNT(*) AS n, COALESCE(SUM(total_subdomains), 0) AS s FROM domains GROUP BY platform_id`,
-    ),
-  ]);
+  // One pass over domains (rows read count against D1's 5M/day free limit).
+  const plats = await sql<{ platform_id: string | null; n: number; e: number; b: number; s: number }>(
+    `SELECT platform_id, COUNT(*) AS n, SUM(enabled) AS e, SUM(claimed_at IS NOT NULL) AS b,
+            COALESCE(SUM(total_subdomains), 0) AS s FROM domains GROUP BY platform_id`,
+  );
+  const tot = plats.reduce(
+    (a, p) => ({ n: a.n + Number(p.n), e: a.e + Number(p.e ?? 0), b: a.b + Number(p.b ?? 0), s: a.s + Number(p.s) }),
+    { n: 0, e: 0, b: 0, s: 0 },
+  );
   const agg: Agg = {
     generated_at: nowIso(),
     total_domains: Number(tot?.n ?? 0),
@@ -836,6 +837,8 @@ export function ensureRpcs() {
   if (registered) return;
   registered = true;
   setFastCount(async (table, filters) => {
+    // Full lists aren't stored; the unfiltered "subdomains" count means "hosts known", from the snapshot.
+    if (table === "subdomains") return filters.length === 0 ? (await getAgg()).sum_total : null;
     if (table !== "domains") return null;
     const plain = filters.filter((f): f is Extract<typeof f, { col: string }> => "col" in f);
     if (plain.length !== filters.length) return null;

@@ -10,7 +10,7 @@ const CYCLE_MINUTES = 240; // every root domain rescanned every 4 hours (Chaos d
 const GROUP_SIZE = 5; // small roots per scan invocation (keeps each run near the 10 ms CPU budget)
 const BIG_ROOT = 15_000; // roots above this many hosts get an invocation of their own
 const MAX_PER_MINUTE = 260;
-const AGG_EVERY_MS = 30 * 60_000;
+const AGG_EVERY_MS = 60 * 60_000;
 const PROBE_LANES = 3;
 const PROBE_WALL_MS = 40_000;
 
